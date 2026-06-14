@@ -1,0 +1,22 @@
+artifact_path: file:C:/Users/ahmet/istanbul-parking/mlruns/1/models/m-8fbdee7a66724e3bb93f85f38b93a923/artifacts
+flavors:
+  python_function:
+    data: model.ubj
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.xgboost
+    python_version: 3.14.6
+  xgboost:
+    code: null
+    data: model.ubj
+    model_class: xgboost.sklearn.XGBClassifier
+    model_format: ubj
+    xgb_version: 3.2.0
+mlflow_version: 3.13.0
+model_id: m-8fbdee7a66724e3bb93f85f38b93a923
+model_size_bytes: 787821
+model_uuid: m-8fbdee7a66724e3bb93f85f38b93a923
+prompts: null
+run_id: aacad2e716f444fa8235e54d509b7f25
+utc_time_created: '2026-06-14 17:45:09.875196'
