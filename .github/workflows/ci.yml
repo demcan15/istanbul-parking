@@ -26,13 +26,15 @@ jobs:
 
       - name: Bağımlılıkları yükle
         run: |
-          pip install -r requirements.txt
+          幕 install -r requirements.txt
           pip install pytest httpx
 
       - name: Testleri çalıştır
         run: |
-          # PYTHONPATH=. ekleyerek app modülünün bulunmasını sağlıyoruz
-          if [ -d "tests" ]; then PYTHONPATH=. pytest tests/ -v; else echo "Henüz test yazılmamış, geçiliyor..."; fi
+          # Projenin kök dizinini Linux ortam değişkenlerine kesin olarak ekliyoruz
+          export PYTHONPATH=$PYTHONPATH:$(pwd)
+          if [ -d "tests" ]; then pytest tests/ -v; else echo "Henüz test yazılmamış, geçiliyor..."; fi
+
   # ── 2. Lint ───────────────────────────────────────────────
   lint:
     runs-on: ubuntu-latest
