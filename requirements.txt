@@ -9,3 +9,5 @@ joblib==1.4.2
 numpy==1.26.4
 pandas==2.2.2
 mlflow==2.13.0
+evidently==0.4.30
+prometheus-fastapi-instrumentator==7.0.0

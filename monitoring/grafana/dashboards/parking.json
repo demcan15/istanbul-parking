@@ -1,0 +1,57 @@
+{
+  "title": "Istanbul Parking ML Dashboard",
+  "panels": [
+    {
+      "title": "Toplam Tahmin / dakika",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "targets": [{
+        "expr": "rate(parking_predictions_total[1m]) * 60",
+        "legendFormat": "{{district}} - {{prediction}}"
+      }]
+    },
+    {
+      "title": "Tahmin Latency P95 (ms)",
+      "type": "stat",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 8},
+      "targets": [{
+        "expr": "histogram_quantile(0.95, rate(parking_prediction_latency_seconds_bucket[5m])) * 1000",
+        "legendFormat": "P95 ms"
+      }]
+    },
+    {
+      "title": "Model Accuracy",
+      "type": "gauge",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 8},
+      "targets": [{
+        "expr": "parking_model_accuracy",
+        "legendFormat": "Accuracy"
+      }],
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "minVizValue": 0,
+        "maxVizValue": 1
+      }
+    },
+    {
+      "title": "Kullanıcı Raporları",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "targets": [{
+        "expr": "rate(parking_reports_total[5m])",
+        "legendFormat": "{{is_available}}"
+      }]
+    },
+    {
+      "title": "API Error Rate",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "targets": [{
+        "expr": "rate(http_requests_total{status=~'5..'}[5m])",
+        "legendFormat": "5xx errors"
+      }]
+    }
+  ],
+  "refresh": "10s",
+  "time": {"from": "now-1h", "to": "now"}
+}
