@@ -2,16 +2,22 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, gcp-setup]
   pull_request:
     branches: [main]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Node.js 20 deprecation uyarısını şimdiden çözer
+
 jobs:
+
   # ── 1. Test ───────────────────────────────────────────────
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Tüm Git geçmişini çekerek 128 checkout hatasını engeller
 
       - name: Python kur
         uses: actions/setup-python@v5
@@ -25,7 +31,6 @@ jobs:
 
       - name: Testleri çalıştır
         run: |
-          # Eğer henüz tests/ klasörün yoksa pipeline çökmesin diye kontrol ekledik
           if [ -d "tests" ]; then pytest tests/ -v; else echo "Henüz test yazılmamış, geçiliyor..."; fi
 
   # ── 2. Lint ───────────────────────────────────────────────
@@ -33,6 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -40,14 +47,16 @@ jobs:
       - run: ruff check app/ ml/ --allow-empty || echo "Ruff uyarıları geçildi"
       - run: black --check app/ ml/ || echo "Black uyarıları geçildi"
 
-  # ── 3. Docker build & GCP Push ────────────────────────────
+  # ── 3. Deploy (sadece gcp-setup veya main branch) ─────────
   deploy:
     runs-on: ubuntu-latest
     needs: [test, lint]
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/gcp-setup'
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: GCP kimlik doğrula
         uses: google-github-actions/auth@v2

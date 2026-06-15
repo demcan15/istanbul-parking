@@ -4,7 +4,8 @@ on:
   schedule:
     - cron: "0 2 * * *"   # Her gün 02:00 UTC (05:00 İstanbul)
   workflow_dispatch:        # Manuel tetikleme de mümkün
-
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Yarınki GitHub güncellemesini şimdiden kabul ediyoruz
 jobs:
   retrain:
     runs-on: ubuntu-latest
