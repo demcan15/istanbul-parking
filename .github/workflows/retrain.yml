@@ -1,0 +1,37 @@
+name: Günlük Model Retraining
+
+on:
+  schedule:
+    - cron: "0 2 * * *"   # Her gün 02:00 UTC (05:00 İstanbul)
+  workflow_dispatch:        # Manuel tetikleme de mümkün
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Yarınki GitHub güncellemesini şimdiden kabul ediyoruz
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Bağımlılıkları yükle
+        run: pip install -r requirements.txt
+
+      - name: Veriyi güncelle
+        run: python ml/generate_data.py
+
+      - name: Modeli yeniden eğit
+        run: python ml/train.py
+
+      - name: Drift kontrolü yap
+        run: python ml/monitoring.py
+
+      - name: Yeni modeli commit et
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add ml/models/
+          git diff --staged --quiet || git commit -m "chore: otomatik model güncellemesi $(date +'%Y-%m-%d')"
+          git push
