@@ -31,8 +31,8 @@ jobs:
 
       - name: Testleri çalıştır
         run: |
-          if [ -d "tests" ]; then pytest tests/ -v; else echo "Henüz test yazılmamış, geçiliyor..."; fi
-
+          # PYTHONPATH=. ekleyerek app modülünün bulunmasını sağlıyoruz
+          if [ -d "tests" ]; then PYTHONPATH=. pytest tests/ -v; else echo "Henüz test yazılmamış, geçiliyor..."; fi
   # ── 2. Lint ───────────────────────────────────────────────
   lint:
     runs-on: ubuntu-latest
