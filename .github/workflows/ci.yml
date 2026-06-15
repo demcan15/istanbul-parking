@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Node.js 20 deprecation uyarısını şimdiden çözer
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
 
@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Tüm Git geçmişini çekerek 128 checkout hatasını engeller
+          fetch-depth: 0
 
       - name: Python kur
         uses: actions/setup-python@v5
@@ -26,82 +26,12 @@ jobs:
 
       - name: Bağımlılıkları yükle
         run: |
-          幕 install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
           pip install pytest httpx
 
       - name: Testleri çalıştır
         run: |
-          # Projenin kök dizinini Linux ortam değişkenlerine kesin olarak ekliyoruz
-          export PYTHONPATH=$PYTHONPATH:$(pwd)
-          if [ -d "tests" ]; then pytest tests/ -v; else echo "Henüz test yazılmamış, geçiliyor..."; fi
-
-  # ── 2. Lint ───────────────────────────────────────────────
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install ruff black
-      - run: ruff check app/ ml/ --allow-empty || echo "Ruff uyarıları geçildi"
-      - run: black --check app/ ml/ || echo "Black uyarıları geçildi"
-
-  # ── 3. Deploy (sadece gcp-setup veya main branch) ─────────
-  deploy:
-    runs-on: ubuntu-latest
-    needs: [test, lint]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/gcp-setup'
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: GCP kimlik doğrula
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: gcloud kur
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Docker'ı Artifact Registry için yapılandır
-        run: |
-          gcloud auth configure-docker europe-west1-docker.pkg.dev
-
-      - name: API image build et ve push et
-        run: |
-          docker build -t europe-west1-docker.pkg.dev/istanbul-parking-2026-ad/istanbul-parking/api:${{ github.sha }} \
-            -f Dockerfile.api .
-          docker push europe-west1-docker.pkg.dev/istanbul-parking-2026-ad/istanbul-parking/api:${{ github.sha }}
-
-      - name: Frontend image build et ve push et
-        run: |
-          docker build -t europe-west1-docker.pkg.dev/istanbul-parking-2026-ad/istanbul-parking/frontend:${{ github.sha }} \
-            -f Dockerfile.frontend .
-          docker push europe-west1-docker.pkg.dev/istanbul-parking-2026-ad/istanbul-parking/frontend:${{ github.sha }}
-
-      - name: API'yi Cloud Run'a deploy et
-        run: |
-          gcloud run deploy parking-api \
-            --image europe-west1-docker.pkg.dev/istanbul-parking-2026-ad/istanbul-parking/api:${{ github.sha }} \
-            --region europe-west1 \
-            --platform managed \
-            --quiet
-
-      - name: Frontend'i Cloud Run'a deploy et
-        run: |
-          gcloud run deploy parking-frontend \
-            --image europe-west1-docker.pkg.dev/istanbul-parking-2026-ad/istanbul-parking/frontend:${{ github.sha }} \
-            --region europe-west1 \
-            --platform managed \
-            --quiet
-
-      - name: Deploy URL'lerini yazdır
-        run: |
-          echo "✅ Deploy tamamlandı!"
-          gcloud run services describe parking-api --region europe-west1 --format 'value(status.url)'
-          gcloud run services describe parking-frontend --region europe-west1 --format 'value(status.url)'
+          python -m pytest tests/ -v
+        env:
+          PYTHONPATH: .
