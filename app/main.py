@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
@@ -91,14 +91,14 @@ try:
         host=os.getenv("REDIS_HOST", "localhost"),
         port=6379,
         decode_responses=True,
-        socket_timeout=5
+        socket_timeout=3  # 3 saniyede bağlanamazsa düşer, API'yi kilitlemez
     )
     # Bağlantıyı test et
     r.ping()
     print("🚀 Redis önbellek sunucusuna başarıyla bağlanıldı.")
 except Exception as e:
     r = None
-    print("ℹ️ Redis aktif değil. API doğrudan canlı veritabanı sorgularıyla devam edecek.")
+    print("ℹ️ Redis aktif değil veya zaman aşımına uğradı. Doğrudan canlı DB sorguları kullanılacak.")
 
 # --- ENDPOINT: Tahmin (ML Inference) Rotası ---
 @app.get("/api/predict/{spot_id}")
@@ -125,7 +125,7 @@ def predict_availability(spot_id: int, is_raining: bool = False, has_event: bool
     district, current_status = row
     now = datetime.now()
 
-    # Model yüklü değilse akıllı kural bazlı yedek (fallback) tahmini devrreye al
+    # Model yüklü değilse akıllı kural bazlı yedek (fallback) tahmini devreye al
     if not model or not label_encoder:
         prob = 0.65 if now.hour < 8 or now.hour > 20 else 0.35
         if is_raining: prob -= 0.15
@@ -143,7 +143,7 @@ def predict_availability(spot_id: int, is_raining: bool = False, has_event: bool
             int(is_raining),
             int(has_event),
             district_enc,
-            0.75  # Varsayılan doluluk oranı katmanı
+            0.75
         ]])
         prob = model.predict_proba(features)[0][1]
 
@@ -167,16 +167,17 @@ def predict_availability(spot_id: int, is_raining: bool = False, has_event: bool
 # --- ENDPOINT: Coğrafi Yakınlık (PostGIS) Sorgusu ---
 @app.get("/api/spots")
 def get_nearby_spots(lat: float, lng: float, radius: int = 1000):
-    """Verilen koordinatın etrafındaki (radius metre) otoparkları PostGIS ile çeker."""
+    """Verilen koordinatın etrafındaki otoparkları PostGIS ile çeker, Redis çökse bile çalışır."""
     cache_key = f"spots:{lat:.3f}:{lng:.3f}:{radius}"
     
+    # Redis bağlantısını sarmalayarak zaman aşımı (Timeout) durumunda API'nin çökmesini önlüyoruz
     if r:
         try:
             cached = r.get(cache_key)
             if cached:
                 return json.loads(cached)
-        except Exception:
-            pass # Redis cache miss durumunda DB'ye düşmesi için hatayı yutuyoruz
+        except Exception as redis_err:
+            print(f"ℹ️ Redis bağlantı hatası yutuldu (DB'ye yönlendiriliyor): {redis_err}")
     
     try:
         conn = get_db()
@@ -210,7 +211,7 @@ def get_nearby_spots(lat: float, lng: float, radius: int = 1000):
     
     if r and spots:
         try:
-            r.setex(cache_key, 60, json.dumps(spots)) # 60 saniye boyunca önbellekte tut
+            r.setex(cache_key, 60, json.dumps(spots))
         except Exception:
             pass
             
@@ -261,31 +262,4 @@ def submit_report(report: ReportIn):
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
-
-@app.post("/api/spots/seed")
-def seed_spots():
-    """Geliştirme ve test süreçleri için örnek Beşiktaş otoparkları enjekte eder."""
-    spots = [
-        (41.0422, 29.0083, "Beşiktaş", "Barbaros Blv."),
-        (41.0430, 29.0070, "Beşiktaş", "Çırağan Cd."),
-        (41.0410, 29.0095, "Beşiktaş", "Şair Nedim Cd."),
-        (41.0445, 29.0060, "Beşiktaş", "Ihlamurdere Cd."),
-        (41.0398, 29.0110, "Beşiktaş", "Dolmabahçe Cd."),
-    ]
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        for lat, lng, district, street in spots:
-            cur.execute("""
-                INSERT INTO parking_spots (lat, lng, location, district, street, is_available, capacity, fee, parking_type)
-                VALUES (%s, %s, ST_MakePoint(%s, %s)::geography, %s, %s, TRUE, 120, 'yes', 'surface')
-                ON CONFLICT DO NOTHING;
-            """, (lat, lng, lng, lat, district, street))
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Seeding hatası: {str(e)}")
-        
-    return {"status": "success", "added": len(spots)}
+    return {"status": "healthy"}
