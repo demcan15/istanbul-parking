@@ -114,7 +114,7 @@ jobs:
             --timeout 300 \
             --max-instances 3 \
             --min-instances 0 \
-            --set-env-vars="DB_HOST=${{ secrets.DB_HOST }},DB_NAME=parking_db,DB_USER=parking_user,DB_PASSWORD=${{ secrets.DB_PASSWORD }},REDIS_HOST=${{ secrets.REDIS_HOST }}" \
+            --set-env-vars="DB_HOST=${{ secrets.DB_HOST }},DB_NAME=parking_db,DB_USER=parking_user,REDIS_HOST=${{ secrets.REDIS_HOST }}" \
             --allow-unauthenticated \
             --quiet
 
