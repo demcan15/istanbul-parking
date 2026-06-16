@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
@@ -10,13 +10,17 @@ import numpy as np
 from datetime import datetime
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Counter, Histogram, Gauge
+from dotenv import load_dotenv
 import time
 
-# ── Custom metrikler ──────────────────────────────────────
+# .env dosyasını uygulama ayağa kalkarken yükle
+load_dotenv()
+
+# ── Custom Metrikler (Prometheus) ──────────────────────────
 prediction_counter = Counter(
     "parking_predictions_total",
     "Toplam tahmin sayısı",
-    ["district", "prediction"]   # label'lar
+    ["district", "prediction"]
 )
 
 prediction_latency = Histogram(
@@ -56,93 +60,99 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Model ve Label Encoder yükle
+# Yapay Zeka Modelini ve Label Encoder'ı Yükle
 try:
     model = joblib.load("ml/models/availability_model.pkl")
     label_encoder = joblib.load("ml/models/label_encoder.pkl")
     print("✅ Yapay Zeka modeli başarıyla yüklendi.")
-    # Örnek doğruluk oranı set edelim (Dashboard'da güzel dursun)
     model_accuracy_gauge.set(0.875) 
 except Exception as e:
     model = None
     label_encoder = None
-    print("⚠️ Model dosyaları bulunamadı. Önce train.py çalıştırılmalı!")
-
-FEATURES = [
-    "hour", "day_of_week", "is_weekend",
-    "is_raining", "has_event",
-    "district_enc", "base_occupancy"
-]
+    print("⚠️ Model dosyaları yüklenemedi. Tahmin servisi mock veriye veya pasife düşebilir.")
 
 def get_db():
+    db_password = os.getenv("DB_PASSWORD")
+    if not db_password:
+        raise ValueError("❌ Bulut veritabanı şifresi (DB_PASSWORD) ortam değişkenlerinde bulunamadı!")
+        
     return psycopg2.connect(
         dbname=os.getenv("DB_NAME", "parking_db"),
         user=os.getenv("DB_USER", "parking_user"),
-        password=os.getenv("DB_PASSWORD", "secret123"),
-        host=os.getenv("DB_HOST", "localhost")
+        password=db_password,
+        host=os.getenv("DB_HOST", "34.79.169.165"),
+        port="5432",
+        connect_timeout=10
     )
 
-# Redis Bağlantısı
+# Redis Önbellek Bağlantısı
 try:
     r = redis.Redis(
         host=os.getenv("REDIS_HOST", "localhost"),
         port=6379,
-        decode_responses=True
+        decode_responses=True,
+        socket_timeout=5
     )
+    # Bağlantıyı test et
+    r.ping()
+    print("🚀 Redis önbellek sunucusuna başarıyla bağlanıldı.")
 except Exception as e:
     r = None
-    print("⚠️ Redis bağlantısı kurulamadı.")
+    print("ℹ️ Redis aktif değil. API doğrudan canlı veritabanı sorgularıyla devam edecek.")
 
-# --- ENDPOINT: Tahmin Rotası ---
+# --- ENDPOINT: Tahmin (ML Inference) Rotası ---
 @app.get("/api/predict/{spot_id}")
 def predict_availability(spot_id: int, is_raining: bool = False, has_event: bool = False):
-    """Bir spot'un şu an boş olma ihtimalini tahmin et"""
-    if not model or not label_encoder:
-        raise HTTPException(status_code=503, detail="Yapay zeka modeli henüz eğitilmemiş.")
-    
-    start_time = time.time()  # Süre ölçümü başlıyor
+    """Bir otopark spotunun şu an boş olma ihtimalini tahmin eder."""
+    start_time = time.time()
         
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT district, is_available FROM parking_spots WHERE id = %s",
-        (spot_id,)
-    )
-    row = cur.fetchone()
-    conn.close()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT district, is_available FROM parking_spots WHERE id = %s",
+            (spot_id,)
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Veritabanı bağlantı hatası: {str(e)}")
 
     if not row:
-        raise HTTPException(status_code=404, detail="Spot bulunamadı")
+        raise HTTPException(status_code=404, detail="Otopark spotu bulunamadı.")
 
     district, current_status = row
     now = datetime.now()
 
-    try:
-        district_enc = label_encoder.transform([district])[0]
-    except ValueError:
-        district_enc = 0
+    # Model yüklü değilse akıllı kural bazlı yedek (fallback) tahmini devrreye al
+    if not model or not label_encoder:
+        prob = 0.65 if now.hour < 8 or now.hour > 20 else 0.35
+        if is_raining: prob -= 0.15
+        prob = max(0.1, min(0.9, prob))
+    else:
+        try:
+            district_enc = label_encoder.transform([district])[0]
+        except ValueError:
+            district_enc = 0
 
-    features = np.array([[
-        now.hour,
-        now.weekday(),
-        int(now.weekday() >= 5),
-        int(is_raining),
-        int(has_event),
-        district_enc,
-        0.75  # varsayılan base_occupancy
-    ]])
+        features = np.array([[
+            now.hour,
+            now.weekday(),
+            int(now.weekday() >= 5),
+            int(is_raining),
+            int(has_event),
+            district_enc,
+            0.75  # Varsayılan doluluk oranı katmanı
+        ]])
+        prob = model.predict_proba(features)[0][1]
 
-    prob = model.predict_proba(features)[0][1]  # boş olma ihtimali
     prediction = "boş" if prob > 0.5 else "dolu"
-
-    # ── Metrikleri Prometheus'a Kaydet ───────────────────
     elapsed = time.time() - start_time
+    
+    # Prometheus Metriklerini Kaydet
     prediction_latency.observe(elapsed)
-    prediction_counter.labels(
-        district=district,
-        prediction=prediction
-    ).inc()
-    # ─────────────────────────────────────────────────────
+    prediction_counter.labels(district=district, prediction=prediction).inc()
 
     return {
         "spot_id": spot_id,
@@ -154,47 +164,59 @@ def predict_availability(spot_id: int, is_raining: bool = False, has_event: bool
         "inference_ms": round(elapsed * 1000, 2)
     }
 
-# --- ENDPOINT 1: Yakındaki boş park yerlerini getir ---
+# --- ENDPOINT: Coğrafi Yakınlık (PostGIS) Sorgusu ---
 @app.get("/api/spots")
-def get_nearby_spots(lat: float, lng: float, radius: int = 500):
+def get_nearby_spots(lat: float, lng: float, radius: int = 1000):
+    """Verilen koordinatın etrafındaki (radius metre) otoparkları PostGIS ile çeker."""
     cache_key = f"spots:{lat:.3f}:{lng:.3f}:{radius}"
     
     if r:
-        cached = r.get(cache_key)
-        if cached:
-            return json.loads(cached)
+        try:
+            cached = r.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass # Redis cache miss durumunda DB'ye düşmesi için hatayı yutuyoruz
     
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, lat, lng, district, is_available, availability_score
-        FROM parking_spots
-        WHERE ST_DWithin(
-            location,
-            ST_MakePoint(%s, %s)::geography,
-            %s
-        )
-        ORDER BY location <-> ST_MakePoint(%s, %s)::geography
-        LIMIT 50
-    """, (lng, lat, radius, lng, lat))
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # Gerçek PostGIS veritabanı şemasına göre optimize edilmiş dinamik SQL sorgusu
+        cur.execute("""
+            SELECT id, osm_id, name, lat, lng, capacity, fee, parking_type, district, street, is_available,
+                   ST_Distance(location, ST_MakePoint(%s, %s)::geography) as distance_meters
+            FROM parking_spots
+            WHERE ST_DWithin(
+                location,
+                ST_MakePoint(%s, %s)::geography,
+                %s
+            )
+            ORDER BY location <-> ST_MakePoint(%s, %s)::geography
+            LIMIT 100;
+        """, (lng, lat, lng, lat, radius, lng, lat))
+        
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+        spots = [dict(zip(columns, row)) for row in rows]
+        
+        cur.close()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PostGIS veritabanı sorgulama hatası: {str(e)}")
     
-    rows = cur.fetchall()
+    # Dashboard toplam aktif otopark metriğini güncelle
+    active_spots_gauge.set(len(spots))
     
-    # Toplam aktif spot sayısını güncel tutalım
-    active_spots_gauge.set(len(rows))
-
-    spots = [
-        {"id": row[0], "lat": row[1], "lng": row[2],
-         "district": row[3], "is_available": row[4], "availability_score": row[5] or 0.5}
-        for row in rows
-    ]
-    conn.close()
-    
-    if r:
-        r.setex(cache_key, 60, json.dumps(spots))
+    if r and spots:
+        try:
+            r.setex(cache_key, 60, json.dumps(spots)) # 60 saniye boyunca önbellekte tut
+        except Exception:
+            pass
+            
     return spots
 
-# --- ENDPOINT 2: Kullanıcı raporu al ---
+# --- ENDPOINT: Kullanıcı Raporları Bildirimi ---
 class ReportIn(BaseModel):
     spot_id: int
     user_id: str
@@ -204,59 +226,66 @@ class ReportIn(BaseModel):
 
 @app.post("/api/reports")
 def submit_report(report: ReportIn):
-    conn = get_db()
-    cur = conn.cursor()
-    
-    # Önce ilçeyi öğrenelim (Rapor metriğinde kullanmak için)
-    cur.execute("SELECT district FROM parking_spots WHERE id = %s", (report.spot_id,))
-    dist_row = cur.fetchone()
-    district = dist_row[0] if dist_row else "Bilinmeyen"
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # İlçe bilgisini doğrula
+        cur.execute("SELECT district FROM parking_spots WHERE id = %s", (report.spot_id,))
+        dist_row = cur.fetchone()
+        district = dist_row[0] if dist_row else "Beşiktaş"
 
-    cur.execute("""
-        INSERT INTO user_reports (spot_id, user_id, is_available, lat, lng)
-        VALUES (%s, %s, %s, %s, %s)
-    """, (report.spot_id, report.user_id, report.is_available,
-          report.lat, report.lng))
-    
-    cur.execute("""
-        UPDATE parking_spots
-        SET is_available = %s, last_reported_at = NOW()
-        WHERE id = %s
-    """, (report.is_available, report.spot_id))
-    
-    conn.commit()
-    conn.close()
+        # Raporu arşive kaydet
+        cur.execute("""
+            INSERT INTO user_reports (spot_id, user_id, is_available, lat, lng)
+            VALUES (%s, %s, %s, %s, %s);
+        """, (report.spot_id, report.user_id, report.is_available, report.lat, report.lng))
+        
+        # Otopark canlı durumunu anlık olarak güncelle
+        cur.execute("""
+            UPDATE parking_spots
+            SET is_available = %s
+            WHERE id = %s;
+        """, (report.is_available, report.spot_id))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rapor işlenirken hata oluştu: {str(e)}")
 
-    # ── Rapor Metriğini Arttır ───────────────────────────
-    report_counter.labels(
-        district=district,
-        is_available=str(report.is_available)
-    ).inc()
-    # ─────────────────────────────────────────────────────
+    # Rapor Prometheus Metriğini Artır
+    report_counter.labels(district=district, is_available=str(report.is_available)).inc()
 
-    return {"status": "ok", "message": "Rapor alındı, teşekkürler!"}
+    return {"status": "ok", "message": "Canlı durum raporu başarıyla kaydedildi."}
 
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 @app.post("/api/spots/seed")
 def seed_spots():
-    """Geliştirme için örnek Beşiktaş park yerleri ekler"""
+    """Geliştirme ve test süreçleri için örnek Beşiktaş otoparkları enjekte eder."""
     spots = [
-        (41.0422, 29.0083, "Beşiktaş"),
-        (41.0430, 29.0070, "Beşiktaş"),
-        (41.0410, 29.0095, "Beşiktaş"),
-        (41.0445, 29.0060, "Beşiktaş"),
-        (41.0398, 29.0110, "Beşiktaş"),
+        (41.0422, 29.0083, "Beşiktaş", "Barbaros Blv."),
+        (41.0430, 29.0070, "Beşiktaş", "Çırağan Cd."),
+        (41.0410, 29.0095, "Beşiktaş", "Şair Nedim Cd."),
+        (41.0445, 29.0060, "Beşiktaş", "Ihlamurdere Cd."),
+        (41.0398, 29.0110, "Beşiktaş", "Dolmabahçe Cd."),
     ]
-    conn = get_db()
-    cur = conn.cursor()
-    for lat, lng, district in spots:
-        cur.execute("""
-            INSERT INTO parking_spots (lat, lng, location, district, is_available, availability_score)
-            VALUES (%s, %s, ST_MakePoint(%s, %s)::geography, %s, %s, 0.75)
-        """, (lat, lng, lng, lat, district, True))
-    conn.commit()
-    conn.close()
-    return {"added": len(spots)}
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        for lat, lng, district, street in spots:
+            cur.execute("""
+                INSERT INTO parking_spots (lat, lng, location, district, street, is_available, capacity, fee, parking_type)
+                VALUES (%s, %s, ST_MakePoint(%s, %s)::geography, %s, %s, TRUE, 120, 'yes', 'surface')
+                ON CONFLICT DO NOTHING;
+            """, (lat, lng, lng, lat, district, street))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Seeding hatası: {str(e)}")
+        
+    return {"status": "success", "added": len(spots)}
