@@ -3,13 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
 import os
-from datetime import datetime
 from dotenv import load_dotenv
 
 # .env dosyasını yükle
 load_dotenv()
 
-app = FastAPI(title="Istanbul Parking API - Production Mode")
+app = FastAPI(title="Istanbul Parking API - Cloud SQL Fix")
 
 # CORS Ayarları
 app.add_middleware(
@@ -25,11 +24,28 @@ def get_db():
     if not db_password:
         raise ValueError("❌ DB_PASSWORD ortam değişkenlerinde bulunamadı!")
         
+    db_host = os.getenv("DB_HOST", "34.79.169.165")
+    
+    # EĞER CLOUD RUN ÜZERİNDEKİ UNIX SOKET YOLUNDAYSAK
+    if db_host.startswith("/cloudsql"):
+        # psycopg2'nin sonuna otomatik .s.PGSQL.5432 eklemesini düzeltmek için:
+        # host kısmına sadece '/cloudsql' klasörünü, port kısmına ise instance adını paslıyoruz.
+        # PostgreSQL Unix soket standartlarında bağlantı bu şekilde kurulur.
+        instance_name = db_host.replace("/cloudsql/", "")
+        return psycopg2.connect(
+            dbname=os.getenv("DB_NAME", "parking_db"),
+            user=os.getenv("DB_USER", "parking_user"),
+            password=db_password,
+            host="/cloudsql",
+            port=instance_name
+        )
+        
+    # YEREL BİLGİSAYARDAYKEN (Normal IP Bağlantısı)
     return psycopg2.connect(
         dbname=os.getenv("DB_NAME", "parking_db"),
         user=os.getenv("DB_USER", "parking_user"),
         password=db_password,
-        host=os.getenv("DB_HOST", "34.79.169.165"),
+        host=db_host,
         port="5432",
         connect_timeout=10
     )
@@ -37,12 +53,10 @@ def get_db():
 # --- ENDPOINT: Coğrafi Yakınlık (PostGIS) Sorgusu ---
 @app.get("/api/spots")
 def get_nearby_spots(lat: float, lng: float, radius: int = 1000):
-    """Verilen koordinatın etrafındaki otoparkları doğrudan bulut PostGIS veritabanından çeker."""
     try:
         conn = get_db()
         cur = conn.cursor()
         
-        # PostGIS şemasıyla tam uyumlu, performanslı SQL sorgusu
         cur.execute("""
             SELECT id, osm_id, name, lat, lng, capacity, fee, parking_type, district, street, is_available,
                    ST_Distance(location, ST_MakePoint(%s, %s)::geography) as distance_meters
@@ -80,13 +94,11 @@ def submit_report(report: ReportIn):
         conn = get_db()
         cur = conn.cursor()
         
-        # Raporu arşive kaydet
         cur.execute("""
             INSERT INTO user_reports (spot_id, user_id, is_available, lat, lng)
             VALUES (%s, %s, %s, %s, %s);
         """, (report.spot_id, report.user_id, report.is_available, report.lat, report.lng))
         
-        # Otopark canlı durumunu anlık olarak güncelle
         cur.execute("""
             UPDATE parking_spots
             SET is_available = %s
