@@ -1,23 +1,22 @@
-# 1. Aşama: Build (Derleme)
+# 1. Aşama: Build
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Dockerfile zaten frontend klasörünün içinde olduğu için direkt kopyalıyoruz
-COPY package*.json ./
+# Ana dizinden frontend klasörünün içine bakmasını söylüyoruz
+COPY frontend/package*.json ./
 RUN npm install
 
 # Tüm frontend kodunu kopyala ve derle
-COPY . ./
+COPY frontend/ ./
 RUN npm run build
 
-# 2. Aşama: Production (Canlıya Alma)
+# 2. Aşama: Production Nginx
 FROM nginx:alpine
 
-# Nginx varsayılan portunu 8080 yapıyoruz (GCP Cloud Run uyumluluğu için)
 RUN sed -i 's/listen[[:space:]]*80;/listen 8080;/g' /etc/nginx/conf.d/default.conf
 
-# Derlenen frontend çıktılarını Nginx klasörüne aktarıyoruz
+# Derlenen dosyaları kopyala
 COPY --from=builder /app/build /usr/share/nginx/html
 
 EXPOSE 8080
