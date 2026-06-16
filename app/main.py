@@ -2,56 +2,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
-import redis
-import json
 import os
-import joblib
-import numpy as np
 from datetime import datetime
-from prometheus_fastapi_instrumentator import Instrumentator
-from prometheus_client import Counter, Histogram, Gauge
 from dotenv import load_dotenv
-import time
 
-# .env dosyasını uygulama ayağa kalkarken yükle
+# .env dosyasını yükle
 load_dotenv()
 
-# ── Custom Metrikler (Prometheus) ──────────────────────────
-prediction_counter = Counter(
-    "parking_predictions_total",
-    "Toplam tahmin sayısı",
-    ["district", "prediction"]
-)
+app = FastAPI(title="Istanbul Parking API - Production Mode")
 
-prediction_latency = Histogram(
-    "parking_prediction_latency_seconds",
-    "Tahmin süresi",
-    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
-)
-
-model_accuracy_gauge = Gauge(
-    "parking_model_accuracy",
-    "Modelin son ölçülen doğruluğu"
-)
-
-report_counter = Counter(
-    "parking_reports_total",
-    "Toplam kullanıcı raporu",
-    ["district", "is_available"]
-)
-
-active_spots_gauge = Gauge(
-    "parking_active_spots_total",
-    "Sistemdeki toplam aktif spot sayısı"
-)
-
-# 1. FastAPI uygulamasını başlatıyoruz
-app = FastAPI(title="Istanbul Parking API")
-
-# Prometheus otomatik metrik toplama (Uygulama ayağa kalktığında çalışır)
-Instrumentator().instrument(app).expose(app)
-
-# 2. CORS Ayarları
+# CORS Ayarları
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -60,21 +20,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Yapay Zeka Modelini ve Label Encoder'ı Yükle
-try:
-    model = joblib.load("ml/models/availability_model.pkl")
-    label_encoder = joblib.load("ml/models/label_encoder.pkl")
-    print("✅ Yapay Zeka modeli başarıyla yüklendi.")
-    model_accuracy_gauge.set(0.875) 
-except Exception as e:
-    model = None
-    label_encoder = None
-    print("⚠️ Model dosyaları yüklenemedi. Tahmin servisi mock veriye veya pasife düşebilir.")
-
 def get_db():
     db_password = os.getenv("DB_PASSWORD")
     if not db_password:
-        raise ValueError("❌ Bulut veritabanı şifresi (DB_PASSWORD) ortam değişkenlerinde bulunamadı!")
+        raise ValueError("❌ DB_PASSWORD ortam değişkenlerinde bulunamadı!")
         
     return psycopg2.connect(
         dbname=os.getenv("DB_NAME", "parking_db"),
@@ -85,105 +34,15 @@ def get_db():
         connect_timeout=10
     )
 
-# Redis Önbellek Bağlantısı
-try:
-    r = redis.Redis(
-        host=os.getenv("REDIS_HOST", "localhost"),
-        port=6379,
-        decode_responses=True,
-        socket_timeout=3  # 3 saniyede bağlanamazsa düşer, API'yi kilitlemez
-    )
-    # Bağlantıyı test et
-    r.ping()
-    print("🚀 Redis önbellek sunucusuna başarıyla bağlanıldı.")
-except Exception as e:
-    r = None
-    print("ℹ️ Redis aktif değil veya zaman aşımına uğradı. Doğrudan canlı DB sorguları kullanılacak.")
-
-# --- ENDPOINT: Tahmin (ML Inference) Rotası ---
-@app.get("/api/predict/{spot_id}")
-def predict_availability(spot_id: int, is_raining: bool = False, has_event: bool = False):
-    """Bir otopark spotunun şu an boş olma ihtimalini tahmin eder."""
-    start_time = time.time()
-        
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT district, is_available FROM parking_spots WHERE id = %s",
-            (spot_id,)
-        )
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Veritabanı bağlantı hatası: {str(e)}")
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Otopark spotu bulunamadı.")
-
-    district, current_status = row
-    now = datetime.now()
-
-    # Model yüklü değilse akıllı kural bazlı yedek (fallback) tahmini devreye al
-    if not model or not label_encoder:
-        prob = 0.65 if now.hour < 8 or now.hour > 20 else 0.35
-        if is_raining: prob -= 0.15
-        prob = max(0.1, min(0.9, prob))
-    else:
-        try:
-            district_enc = label_encoder.transform([district])[0]
-        except ValueError:
-            district_enc = 0
-
-        features = np.array([[
-            now.hour,
-            now.weekday(),
-            int(now.weekday() >= 5),
-            int(is_raining),
-            int(has_event),
-            district_enc,
-            0.75
-        ]])
-        prob = model.predict_proba(features)[0][1]
-
-    prediction = "boş" if prob > 0.5 else "dolu"
-    elapsed = time.time() - start_time
-    
-    # Prometheus Metriklerini Kaydet
-    prediction_latency.observe(elapsed)
-    prediction_counter.labels(district=district, prediction=prediction).inc()
-
-    return {
-        "spot_id": spot_id,
-        "district": district,
-        "availability_probability": round(float(prob), 3),
-        "prediction": prediction,
-        "confidence": "yüksek" if abs(prob - 0.5) > 0.2 else "düşük",
-        "current_reported_status": current_status,
-        "inference_ms": round(elapsed * 1000, 2)
-    }
-
 # --- ENDPOINT: Coğrafi Yakınlık (PostGIS) Sorgusu ---
 @app.get("/api/spots")
 def get_nearby_spots(lat: float, lng: float, radius: int = 1000):
-    """Verilen koordinatın etrafındaki otoparkları PostGIS ile çeker, Redis çökse bile çalışır."""
-    cache_key = f"spots:{lat:.3f}:{lng:.3f}:{radius}"
-    
-    # Redis bağlantısını sarmalayarak zaman aşımı (Timeout) durumunda API'nin çökmesini önlüyoruz
-    if r:
-        try:
-            cached = r.get(cache_key)
-            if cached:
-                return json.loads(cached)
-        except Exception as redis_err:
-            print(f"ℹ️ Redis bağlantı hatası yutuldu (DB'ye yönlendiriliyor): {redis_err}")
-    
+    """Verilen koordinatın etrafındaki otoparkları doğrudan bulut PostGIS veritabanından çeker."""
     try:
         conn = get_db()
         cur = conn.cursor()
         
-        # Gerçek PostGIS veritabanı şemasına göre optimize edilmiş dinamik SQL sorgusu
+        # PostGIS şemasıyla tam uyumlu, performanslı SQL sorgusu
         cur.execute("""
             SELECT id, osm_id, name, lat, lng, capacity, fee, parking_type, district, street, is_available,
                    ST_Distance(location, ST_MakePoint(%s, %s)::geography) as distance_meters
@@ -203,19 +62,9 @@ def get_nearby_spots(lat: float, lng: float, radius: int = 1000):
         
         cur.close()
         conn.close()
+        return spots
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PostGIS veritabanı sorgulama hatası: {str(e)}")
-    
-    # Dashboard toplam aktif otopark metriğini güncelle
-    active_spots_gauge.set(len(spots))
-    
-    if r and spots:
-        try:
-            r.setex(cache_key, 60, json.dumps(spots))
-        except Exception:
-            pass
-            
-    return spots
+        raise HTTPException(status_code=500, detail=f"PostGIS Veritabanı Hatası: {str(e)}")
 
 # --- ENDPOINT: Kullanıcı Raporları Bildirimi ---
 class ReportIn(BaseModel):
@@ -231,11 +80,6 @@ def submit_report(report: ReportIn):
         conn = get_db()
         cur = conn.cursor()
         
-        # İlçe bilgisini doğrula
-        cur.execute("SELECT district FROM parking_spots WHERE id = %s", (report.spot_id,))
-        dist_row = cur.fetchone()
-        district = dist_row[0] if dist_row else "Beşiktaş"
-
         # Raporu arşive kaydet
         cur.execute("""
             INSERT INTO user_reports (spot_id, user_id, is_available, lat, lng)
@@ -252,13 +96,9 @@ def submit_report(report: ReportIn):
         conn.commit()
         cur.close()
         conn.close()
+        return {"status": "ok", "message": "Canlı durum raporu başarıyla kaydedildi."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Rapor işlenirken hata oluştu: {str(e)}")
-
-    # Rapor Prometheus Metriğini Artır
-    report_counter.labels(district=district, is_available=str(report.is_available)).inc()
-
-    return {"status": "ok", "message": "Canlı durum raporu başarıyla kaydedildi."}
 
 @app.get("/health")
 def health():
